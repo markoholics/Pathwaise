@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pathwaise — learn anything, in the right order</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Pathwaise</div>
+    <div class="tagline">A personalized, sequenced learning plan — built from what's freely available online.</div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="panel">
+        <h2 class="panel-title">Start a path</h2>
+        <form id="topic-form">
+          <input id="topic-input" type="text" placeholder="What do you want to learn?" autocomplete="off" />
+          <button type="submit">Generate plan</button>
+        </form>
+        <div class="suggested-topics">
+          <span class="muted">Try:</span>
+          <button type="button" class="suggested-topic" data-topic="machine learning">machine learning</button>
+          <button type="button" class="suggested-topic" data-topic="public speaking">public speaking</button>
+          <button type="button" class="suggested-topic" data-topic="guitar">guitar</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel-title">My paths</h2>
+        <div id="paths-list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title-row">
+          <h2 class="panel-title">How you learn</h2>
+          <button id="onboarding-toggle" type="button" class="link-btn">edit</button>
+        </div>
+        <div id="style-profile" class="style-profile"></div>
+        <p class="muted small">Pathwaise adjusts this as you give feedback on resources.</p>
+      </section>
+
+      <section class="panel premium-panel">
+        <h2 class="panel-title">Premium</h2>
+        <ul class="premium-list">
+          <li>Unlimited resources per path (free plan caps at 15)</li>
+          <li>Continuous optimization of every course as your learning methodology is learned</li>
+          <li>Priority curation refresh across all your active paths</li>
+        </ul>
+        <button class="upgrade-btn" disabled title="Not yet available">Upgrade — coming soon</button>
+      </section>
+    </aside>
+
+    <section class="content">
+      <div id="onboarding" class="onboarding collapsed">
+        <h2>Tell us how you learn</h2>
+        <p class="muted">Three quick questions — this shapes the order and mix of resources in every plan.</p>
+        <div id="quiz"></div>
+      </div>
+
+      <div id="plan-header" class="plan-header"></div>
+      <div id="plan" class="plan"></div>
+    </section>
+  </main>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
