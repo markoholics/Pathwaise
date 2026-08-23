@@ -217,73 +217,278 @@ function setActiveTopic(key) {
   renderPathsList();
 }
 
-// --- Onboarding quiz ---------------------------------------------------------
+// --- Onboarding: implicit cognitive-style tasks -----------------------------
+//
+// Rather than asking "how do you prefer to learn?", this runs four short
+// performance tasks — one per modality — and infers style weights from how
+// the learner actually does on each: accuracy, response speed, and a couple
+// of behavioral tells (do they reach for a text fallback instead of
+// listening; do they read a hint before trying, or just try things). This is
+// a lightweight heuristic, not a validated psychometric instrument — it's
+// meant to give a plausible starting point that the feedback-driven
+// adaptation in applyFeedback() then refines through real usage.
 
-const QUIZ_QUESTIONS = [
-  {
-    prompt: "When learning something new, you'd rather...",
-    options: [
-      { label: "Watch someone demonstrate it", style: "visual" },
-      { label: "Listen to someone explain it", style: "auditory" },
-      { label: "Read about it in detail", style: "reading" },
-      { label: "Just try it yourself", style: "kinesthetic" },
-    ],
-  },
-  {
-    prompt: "You remember things best when you...",
-    options: [
-      { label: "Saw a diagram or chart", style: "visual" },
-      { label: "Heard it discussed out loud", style: "auditory" },
-      { label: "Wrote it down or took notes", style: "reading" },
-      { label: "Practiced it hands-on", style: "kinesthetic" },
-    ],
-  },
-  {
-    prompt: "Your ideal way to fill a commute is...",
-    options: [
-      { label: "A video essay (audio-only in the background)", style: "auditory" },
-      { label: "A podcast or audiobook", style: "auditory" },
-      { label: "An article saved for later", style: "reading" },
-      { label: "Not learning then — you'd rather be doing something", style: "kinesthetic" },
-    ],
-  },
-];
-
-function renderQuiz() {
-  const container = el("#quiz");
-  container.innerHTML = QUIZ_QUESTIONS.map(
-    (q, qi) => `
-    <div class="quiz-q">
-      <p>${q.prompt}</p>
-      <div class="quiz-options">
-        ${q.options
-          .map(
-            (o, oi) =>
-              `<button class="quiz-opt" data-q="${qi}" data-style="${o.style}">${o.label}</button>`
-          )
-          .join("")}
-      </div>
-    </div>`
-  ).join("");
-
-  els(".quiz-opt").forEach((btn) =>
-    btn.addEventListener("click", () => {
-      styleWeights[btn.dataset.style] = (styleWeights[btn.dataset.style] ?? 1) + 1;
-      btn.closest(".quiz-q").querySelectorAll(".quiz-opt").forEach((b) => b.classList.remove("picked"));
-      btn.classList.add("picked");
-      saveStyleWeights();
-      renderStyleProfile();
-      maybeFinishOnboarding();
-    })
-  );
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
 }
 
-function maybeFinishOnboarding() {
-  const answered = els(".quiz-q").every((q) => q.querySelector(".quiz-opt.picked"));
-  if (answered) {
-    localStorage.setItem(STORE_KEYS.onboarded, "1");
-    el("#onboarding").classList.add("collapsed");
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
   }
+  return a;
+}
+
+// Faster + correct => higher score (efficient processing in that modality).
+// Slower + correct => moderate. Incorrect => low, regardless of speed.
+function scoreFromTime(ms, maxMs) {
+  return clamp(2 - (ms / maxMs) * 1.5, 0.3, 2);
+}
+
+function scoreFromAttempts(attempts) {
+  const base = 2 - Math.max(0, attempts - 2) * 0.15;
+  return clamp(attempts <= 1 ? Math.min(base, 1.2) : base, 0.3, 2);
+}
+
+const VISUAL_TARGET = [0, 2, 4, 6, 8];
+
+function gridHTML(active) {
+  let html = '<div class="grid3">';
+  for (let i = 0; i < 9; i++) html += `<div class="grid-cell ${active.includes(i) ? "on" : ""}"></div>`;
+  html += "</div>";
+  return html;
+}
+
+function taskVisual(container, done) {
+  container.innerHTML = `
+    <p class="task-prompt">Puzzle 1 of 4 — Memorize this pattern.</p>
+    <div class="mini-grid">${gridHTML(VISUAL_TARGET)}</div>
+    <p class="muted small" id="mg-timer">Hiding in 3…</p>
+  `;
+  let n = 3;
+  const timer = setInterval(() => {
+    n--;
+    const t = el("#mg-timer");
+    if (t) t.textContent = n > 0 ? `Hiding in ${n}…` : "";
+    if (n <= 0) {
+      clearInterval(timer);
+      showVisualOptions(container, done);
+    }
+  }, 1000);
+}
+
+function showVisualOptions(container, done) {
+  const options = shuffle([
+    { cells: VISUAL_TARGET, correct: true },
+    { cells: [1, 3, 4, 5, 7], correct: false },
+    { cells: [0, 1, 2, 6, 8], correct: false },
+  ]);
+  container.innerHTML = `
+    <p class="task-prompt">Which pattern matches what you saw?</p>
+    <div class="option-grids">
+      ${options.map((o, i) => `<button type="button" class="grid-option" data-i="${i}">${gridHTML(o.cells)}</button>`).join("")}
+    </div>
+  `;
+  const shownAt = performance.now();
+  els(".grid-option").forEach((btn, i) => {
+    btn.addEventListener("click", () => {
+      const elapsed = performance.now() - shownAt;
+      const correct = options[i].correct;
+      done({ visualRaw: correct ? scoreFromTime(elapsed, 6000) : 0.1 });
+    });
+  });
+}
+
+const AUDIO_SCRIPT =
+  "Three items are needed to finish the task. First, unfold the map. Second, use the brass key to open the drawer. Third, ring the small bell to signal you are done.";
+
+function taskAuditory(container, done) {
+  const supportsSpeech = "speechSynthesis" in window;
+  let usedTranscript = !supportsSpeech;
+  let startedAt = null;
+  container.innerHTML = `
+    <p class="task-prompt">Puzzle 2 of 4 — Listen, then answer.</p>
+    <div class="task-actions">
+      <button id="play-audio" type="button">▶ Play</button>
+      <button id="show-transcript" type="button" class="link-btn">I'd rather read it</button>
+    </div>
+    <div id="transcript" class="transcript hidden"></div>
+    <button id="audio-continue" type="button" class="hidden">Continue</button>
+  `;
+  if (!supportsSpeech) {
+    el("#play-audio").classList.add("hidden");
+    el("#transcript").textContent = AUDIO_SCRIPT;
+    el("#transcript").classList.remove("hidden");
+    el("#audio-continue").classList.remove("hidden");
+    startedAt = performance.now();
+  }
+  el("#play-audio").addEventListener("click", () => {
+    startedAt = startedAt ?? performance.now();
+    window.speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(AUDIO_SCRIPT);
+    utter.onend = () => el("#audio-continue")?.classList.remove("hidden");
+    window.speechSynthesis.speak(utter);
+  });
+  el("#show-transcript").addEventListener("click", () => {
+    usedTranscript = true;
+    startedAt = startedAt ?? performance.now();
+    if (supportsSpeech) window.speechSynthesis.cancel();
+    el("#transcript").textContent = AUDIO_SCRIPT;
+    el("#transcript").classList.remove("hidden");
+    el("#audio-continue").classList.remove("hidden");
+  });
+  el("#audio-continue").addEventListener("click", () => {
+    showAuditoryQuestion(container, done, usedTranscript, startedAt, supportsSpeech);
+  });
+}
+
+function showAuditoryQuestion(container, done, usedTranscript, startedAt, supportsSpeech) {
+  const options = shuffle([
+    { label: "Map → Key → Bell", correct: true },
+    { label: "Key → Map → Bell", correct: false },
+    { label: "Bell → Map → Key", correct: false },
+  ]);
+  container.innerHTML = `
+    <p class="task-prompt">What was the correct order of steps?</p>
+    <div class="quiz-options">${options.map((o, i) => `<button type="button" class="quiz-opt" data-i="${i}">${o.label}</button>`).join("")}</div>
+  `;
+  els(".quiz-opt").forEach((btn, i) => {
+    btn.addEventListener("click", () => {
+      const elapsed = performance.now() - startedAt;
+      const correct = options[i].correct;
+      const auditoryRaw = !supportsSpeech ? null : usedTranscript ? 0.3 : correct ? scoreFromTime(elapsed, 8000) : 0.2;
+      done({
+        auditoryRaw,
+        auditorySupported: supportsSpeech,
+        readingBonusFromAudio: usedTranscript ? 0.3 : 0,
+      });
+    });
+  });
+}
+
+const READING_PASSAGE =
+  "Deep-sea coral reefs can form at depths greater than 2,000 meters, far below where sunlight reaches. Unlike their shallow-water relatives, these corals don't rely on photosynthetic algae for energy — they filter tiny particles of food drifting through cold, dark currents. Some individual coral structures have been found to be over 4,000 years old.";
+
+function taskReading(container, done) {
+  const shownAt = performance.now();
+  container.innerHTML = `
+    <p class="task-prompt">Puzzle 3 of 4 — Read this, then continue.</p>
+    <p class="reading-passage">${READING_PASSAGE}</p>
+    <button id="reading-continue" type="button">Continue</button>
+  `;
+  el("#reading-continue").addEventListener("click", () => {
+    showReadingQuestion(container, done, performance.now() - shownAt);
+  });
+}
+
+function showReadingQuestion(container, done, readingTimeMs) {
+  const options = shuffle([
+    { label: "Over 4,000 years old", correct: true },
+    { label: "Over 400 years old", correct: false },
+    { label: "Over 40,000 years old", correct: false },
+  ]);
+  container.innerHTML = `
+    <p class="task-prompt">How old were the oldest coral structures mentioned?</p>
+    <div class="quiz-options">${options.map((o, i) => `<button type="button" class="quiz-opt" data-i="${i}">${o.label}</button>`).join("")}</div>
+  `;
+  els(".quiz-opt").forEach((btn, i) => {
+    btn.addEventListener("click", () => {
+      const correct = options[i].correct;
+      done({ readingRaw: correct ? scoreFromTime(readingTimeMs, 25000) : 0.1 });
+    });
+  });
+}
+
+function taskKinesthetic(container, done) {
+  const target = Math.floor(Math.random() * 100) + 1;
+  let attempts = 0;
+  let hintUsedFirst = false;
+  let hintOpened = false;
+  container.innerHTML = `
+    <p class="task-prompt">Puzzle 4 of 4 — Find the hidden number (1–100) by trial and error.</p>
+    <input type="range" min="1" max="100" value="50" id="k-slider" />
+    <span id="k-value">50</span>
+    <div class="task-actions">
+      <button id="k-check" type="button">Check</button>
+      <button id="k-hint" type="button" class="link-btn">Need a strategy tip?</button>
+    </div>
+    <p id="k-feedback" class="muted small"></p>
+  `;
+  el("#k-slider").addEventListener("input", (e) => {
+    el("#k-value").textContent = e.target.value;
+  });
+  el("#k-hint").addEventListener("click", () => {
+    if (hintOpened) return;
+    hintOpened = true;
+    if (attempts === 0) hintUsedFirst = true;
+    el("#k-feedback").textContent = "Tip: cut the range in half with each guess.";
+  });
+  el("#k-check").addEventListener("click", () => {
+    const val = Number(el("#k-slider").value);
+    attempts++;
+    if (val === target) {
+      done({
+        kinestheticRaw: hintUsedFirst ? 0.4 : scoreFromAttempts(attempts),
+        kinestheticHintFirst: hintUsedFirst,
+      });
+    } else {
+      el("#k-feedback").textContent = val < target ? "Higher." : "Lower.";
+    }
+  });
+}
+
+const COGNITIVE_TASKS = [taskVisual, taskAuditory, taskReading, taskKinesthetic];
+
+let quizMetrics = {};
+let quizTaskIndex = 0;
+
+function renderQuiz() {
+  quizMetrics = {};
+  quizTaskIndex = 0;
+  runNextTask();
+}
+
+function runNextTask() {
+  const container = el("#quiz");
+  if (quizTaskIndex >= COGNITIVE_TASKS.length) {
+    finishQuiz();
+    return;
+  }
+  const slot = document.createElement("div");
+  container.innerHTML = "";
+  container.appendChild(slot);
+  COGNITIVE_TASKS[quizTaskIndex](slot, (metrics) => {
+    Object.assign(quizMetrics, metrics);
+    quizTaskIndex++;
+    runNextTask();
+  });
+}
+
+function finishQuiz() {
+  const m = quizMetrics;
+  const readingRaw =
+    (m.readingRaw ?? 1) + (m.readingBonusFromAudio || 0) + (m.kinestheticHintFirst ? 0.3 : 0);
+  const raws = {
+    visual: m.visualRaw ?? 1,
+    auditory: m.auditorySupported === false ? null : m.auditoryRaw ?? 1,
+    reading: readingRaw,
+    kinesthetic: m.kinestheticRaw ?? 1,
+  };
+  const supportedValues = Object.values(raws).filter((v) => v !== null);
+  const maxRaw = Math.max(...supportedValues, 0.1);
+  const minRaw = Math.min(...supportedValues, 0);
+  const range = maxRaw - minRaw || 1;
+  LEARNING_STYLES.forEach((s) => {
+    const raw = raws[s.id];
+    styleWeights[s.id] = raw === null ? 1 : clamp(0.4 + ((raw - minRaw) / range) * 3.2, 0.2, 4);
+  });
+  saveStyleWeights();
+  localStorage.setItem(STORE_KEYS.onboarded, "1");
+  el("#quiz").innerHTML = `<p class="quiz-done">Got it — your initial profile is set. It'll keep adjusting as you give feedback on resources in your plans.</p>`;
+  renderStyleProfile();
+  setTimeout(() => el("#onboarding")?.classList.add("collapsed"), 1600);
 }
 
 // --- Topic search -------------------------------------------------------------
@@ -323,7 +528,9 @@ function init() {
     el("#onboarding").classList.add("collapsed");
   }
   el("#onboarding-toggle").addEventListener("click", () => {
+    const willOpen = el("#onboarding").classList.contains("collapsed");
     el("#onboarding").classList.toggle("collapsed");
+    if (willOpen) renderQuiz();
   });
 
   const keys = Object.keys(paths);
